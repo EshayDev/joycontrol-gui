@@ -62,32 +62,46 @@ class CLI:
 
     async def run(self):
         while True:
-            user_input = await ainput(prompt='cmd >> ')
-            if not user_input:
+            try:
+                user_input = await ainput(prompt='cmd >> ')
+                if not user_input:
+                    continue
+
+                # Clean and validate input to prevent corruption
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+
+                for command in user_input.split('&&'):
+                    cmd, *args = shlex.split(command)
+
+                    if cmd == 'exit':
+                        return
+
+                    if hasattr(self, f'cmd_{cmd}'):
+                        try:
+                            result = await getattr(self, f'cmd_{cmd}')(*args)
+                            if result:
+                                print(result)
+                        except Exception as e:
+                            print(e)
+                    elif cmd in self.commands:
+                        try:
+                            result = await self.commands[cmd](*args)
+                            if result:
+                                print(result)
+                        except Exception as e:
+                            print(e)
+                    else:
+                        print('command', cmd, 'not found, call help for help.')
+            except (KeyboardInterrupt, EOFError):
+                # Handle graceful shutdown
+                print("\nExiting...")
+                return
+            except Exception as e:
+                # Handle any other input corruption or asyncio issues
+                print(f"Input error: {e}. Please try again.")
                 continue
-
-            for command in user_input.split('&&'):
-                cmd, *args = shlex.split(command)
-
-                if cmd == 'exit':
-                    return
-
-                if hasattr(self, f'cmd_{cmd}'):
-                    try:
-                        result = await getattr(self, f'cmd_{cmd}')(*args)
-                        if result:
-                            print(result)
-                    except Exception as e:
-                        print(e)
-                elif cmd in self.commands:
-                    try:
-                        result = await self.commands[cmd](*args)
-                        if result:
-                            print(result)
-                    except Exception as e:
-                        print(e)
-                else:
-                    print('command', cmd, 'not found, call help for help.')
 
     @staticmethod
     def deprecated(message):
@@ -160,44 +174,58 @@ class ControllerCLI(CLI):
 
     async def run(self):
         while True:
-            user_input = await ainput(prompt='cmd >> ')
-            if not user_input:
-                continue
+            try:
+                user_input = await ainput(prompt='cmd >> ')
+                if not user_input:
+                    continue
 
-            buttons_to_push = []
+                # Clean and validate input to prevent corruption
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
 
-            for command in user_input.split('&&'):
-                cmd, *args = shlex.split(command)
+                buttons_to_push = []
 
-                if cmd == 'exit':
-                    return
+                for command in user_input.split('&&'):
+                    cmd, *args = shlex.split(command)
 
-                available_buttons = self.controller_state.button_state.get_available_buttons()
+                    if cmd == 'exit':
+                        return
 
-                if hasattr(self, f'cmd_{cmd}'):
-                    try:
-                        result = await getattr(self, f'cmd_{cmd}')(*args)
-                        if result:
-                            print(result)
-                    except Exception as e:
-                        print(e)
-                elif cmd in self.commands:
-                    try:
-                        result = await self.commands[cmd](*args)
-                        if result:
-                            print(result)
-                    except Exception as e:
-                        print(e)
-                elif cmd in available_buttons:
-                    buttons_to_push.append(cmd)
+                    available_buttons = self.controller_state.button_state.get_available_buttons()
+
+                    if hasattr(self, f'cmd_{cmd}'):
+                        try:
+                            result = await getattr(self, f'cmd_{cmd}')(*args)
+                            if result:
+                                print(result)
+                        except Exception as e:
+                            print(e)
+                    elif cmd in self.commands:
+                        try:
+                            result = await self.commands[cmd](*args)
+                            if result:
+                                print(result)
+                        except Exception as e:
+                            print(e)
+                    elif cmd in available_buttons:
+                        buttons_to_push.append(cmd)
+                    else:
+                        print('command', cmd, 'not found, call help for help.')
+
+                if buttons_to_push:
+                    await button_push(self.controller_state, *buttons_to_push)
                 else:
-                    print('command', cmd, 'not found, call help for help.')
-
-            if buttons_to_push:
-                await button_push(self.controller_state, *buttons_to_push)
-            else:
-                try:
-                    await self.controller_state.send()
-                except NotConnectedError:
-                    logger.info('Connection was lost.')
-                    return
+                    try:
+                        await self.controller_state.send()
+                    except NotConnectedError:
+                        logger.info('Connection was lost.')
+                        return
+            except (KeyboardInterrupt, EOFError):
+                # Handle graceful shutdown
+                print("\nExiting...")
+                return
+            except Exception as e:
+                # Handle any other input corruption or asyncio issues
+                print(f"Input error: {e}. Please try again.")
+                continue

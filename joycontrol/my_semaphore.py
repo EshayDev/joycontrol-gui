@@ -28,7 +28,14 @@ class MySemaphore(asyncio.Semaphore):
         if count < 0:
             raise ValueError("Semaphore acquire with count < 0")
         while self._value < count:
-            r = _Request(count, self._loop)
+            # Get the current running loop instead of relying on self._loop
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # Fallback to deprecated get_event_loop for older Python versions
+                loop = asyncio.get_event_loop()
+            
+            r = _Request(count, loop)
             self._waiters.append(r)
             try:
                 await r.future

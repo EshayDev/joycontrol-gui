@@ -39,24 +39,9 @@ class MCUPowerState(enum.Enum):
     # CONFIGURED_IR = 0x05  # TODO: support this
     # CONFIGUERED_UPDATE = 0x06
 
-SET_POWER_VALUES = (
-    MCUPowerState.SUSPENDED.value,
-    MCUPowerState.READY.value,
-    #   MCUPowerState.READY_UPDATE.value,
-)
-
-SET_CONFIG_VALUES = (
-    MCUPowerState.READY.value,
-    MCUPowerState.CONFIGURED_NFC.value,
-    #   MCUPowerState.CONFIGURED_IR.value,
-)
-
-GET_STATUS_VALUES = (
-    MCUPowerState.READY.value,
-    #   MCUPowerState.READY_UPDATE.value,
-    MCUPowerState.CONFIGURED_NFC.value,
-    #   MCUPowerState.CONFIGURED_IR.value
-)
+SET_POWER_VALUES = [0x00, 0x01]  # suspend and ready
+SET_CONFIG_VALUES = [0x04]  # ready and configured_nfc
+GET_STATUS_VALUES = [0x01, 0x04]  # ready and configured_nfc
 
 
 def MCU_crc(data):
@@ -150,9 +135,13 @@ class MicroControllerUnit:
         # If there was no command, this is the default report
         self.no_response = pack_message(0xff)
         self.response_queue = []
-        # to prevent the queue from becoming too laggy, limit it's size
-        # the length after which we start dropping packets
-        self.max_response_queue_len = 4
+        # Increased queue size to handle Splatoon 2's intensive NFC scanning
+        # The original size of 4 was too small for games that spam status requests 8x per frame
+        self.max_response_queue_len = 16
+        
+        # Rate limiting for status requests
+        self._last_status_time = 0
+        self._status_rate_limit = 1/120  # Maximum 120 status responses per second
 
     def _flush_response_queue(self):
         self.response_queue = []
@@ -267,9 +256,16 @@ class MicroControllerUnit:
         @param com: the NFC-command (not the 0x02, the byte after that)
         @param data: the remaining data
         """
+        import time
+        current_time = time.time()
+        
         if com == 0x04:  # status / response request
-            # the switch spams this up to 8 times a frame, there is no way to respond to all
-            self._queue_response(self._get_nfc_status_data(data))
+            # Rate limit status requests to prevent queue overflow
+            # Splatoon 2 spams this up to 8 times a frame, we need to throttle it
+            if current_time - self._last_status_time >= self._status_rate_limit:
+                self._queue_response(self._get_nfc_status_data(data))
+                self._last_status_time = current_time
+            # else: drop the request to prevent queue overflow
         elif com == 0x01:  # start polling, should we queue a nfc_status?
             logger.debug("MCU-NFC: start polling")
             self.nfc_state = NFC_state.POLL
@@ -401,8 +397,12 @@ class MicroControllerUnit:
         @return: None
         """
         if subcommand == 0x01:
-            # status request
-            self._queue_response(self._get_status_data(subcommanddata))
+            # status request - apply rate limiting
+            import time
+            current_time = time.time()
+            if current_time - self._last_status_time >= self._status_rate_limit:
+                self._queue_response(self._get_status_data(subcommanddata))
+                self._last_status_time = current_time
         elif subcommand == 0x02:
             # NFC command
             if self.power_state != MCUPowerState.CONFIGURED_NFC:

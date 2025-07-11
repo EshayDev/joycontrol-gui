@@ -165,29 +165,57 @@ class ControllerProtocol(BaseProtocol):
         subcommand-replies in
         """
         logger.info("writer started")
+        consecutive_slow_count = 0
+        max_consecutive_slow = 5  # Allow up to 5 consecutive slow iterations before warning
+        
         while self.transport:
-            await self._not_paused.wait()
-            last_send_time = time.time()
-            input_report = self._generate_input_report()
             try:
-                await self._write(input_report)
-            except:
-                break
-            # calculate delay
-            self.send_delay = debug.get_delay(self.send_delay) #debug hook
-            active_time = time.time() - last_send_time
-            sleep_time = self.send_delay - active_time
-            if sleep_time < 0:
-                logger.warning(f'Code is running {abs(sleep_time)} s too slow!')
-                sleep_time = 0
+                await self._not_paused.wait()
+                last_send_time = time.time()
+                input_report = self._generate_input_report()
+                try:
+                    await self._write(input_report)
+                except Exception as e:
+                    logger.error(f"Write error in protocol writer: {e}")
+                    # Don't break immediately, try to recover
+                    await asyncio.sleep(0.1)
+                    continue
+                    
+                # calculate delay
+                self.send_delay = debug.get_delay(self.send_delay) #debug hook
+                active_time = time.time() - last_send_time
+                sleep_time = self.send_delay - active_time
+                
+                if sleep_time < 0:
+                    consecutive_slow_count += 1
+                    # Only warn if we're consistently slow, not just occasional hiccups
+                    if consecutive_slow_count <= max_consecutive_slow:
+                        logger.debug(f'Code is running {abs(sleep_time)} s too slow! (count: {consecutive_slow_count})')
+                    elif consecutive_slow_count == max_consecutive_slow + 1:
+                        logger.warning(f'Code consistently running slow for {consecutive_slow_count} iterations, latest: {abs(sleep_time)} s too slow!')
+                    
+                    # Instead of exiting, just continue without sleep and try to catch up
+                    sleep_time = 0
+                else:
+                    # Reset counter when we're running at normal speed
+                    consecutive_slow_count = 0
 
-            try:
-                await asyncio.wait_for(self._input_report_wakeup.wait(), timeout=sleep_time)
-                self._input_report_wakeup.clear()
-            except asyncio.TimeoutError as err:
-                pass
+                try:
+                    await asyncio.wait_for(self._input_report_wakeup.wait(), timeout=sleep_time)
+                    self._input_report_wakeup.clear()
+                except asyncio.TimeoutError:
+                    pass
+            except Exception as e:
+                logger.error(f"Unexpected error in protocol writer: {e}")
+                # Don't exit the writer thread, try to recover
+                await asyncio.sleep(0.1)
+                continue
 
         logger.warning("Writer exited...")
+        # Try to restart the writer if transport is still available
+        if self.transport and not self.transport.is_closing():
+            logger.info("Attempting to restart writer thread...")
+            self._writer_thread = utils.start_asyncio_thread(self._writer())
         return None
 
     async def _reply_to_sub_command(self, report):
